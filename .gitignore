@@ -1,0 +1,34 @@
+# Unity generated
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+.vs/
+.idea/
+*.csproj
+*.sln
+!tests/CoreTests/CoreTests.csproj
+*.user
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+sysinfo.txt
+*.apk
+*.aab
+*.unitypackage
+crashlytics-build.properties
+# Keep generated asset manifest sources, ignore heavyweight binaries
+Assets/Generated/**/*.png
+Assets/Generated/**/*.wav
+Assets/Generated/**/*.asset
+!Assets/Generated/.gitkeep
+Local/
