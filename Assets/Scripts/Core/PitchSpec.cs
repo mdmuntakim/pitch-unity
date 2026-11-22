@@ -25,6 +25,7 @@ namespace Pitch.Core
         public const float GoalAreaHalfWidth = 9.16f;
         public const float PenaltySpot = 11f;
         public const float CentreCircleRadius = 9.15f;
+        public const float PenaltyArcRadius = 9.15f;
         public const float CornerArcRadius = 1f;
 
         public const float BallRadius = 0.11f;

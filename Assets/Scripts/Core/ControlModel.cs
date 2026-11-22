@@ -133,6 +133,15 @@ namespace Pitch.Core
         }
 
         public void StickMove(Vec3 screenPoint) => Stick.Drag(screenPoint, Radius * Settings.JoystickScale);
+
+        /// <summary>Keyboard/desktop fallback that feeds the same movement path as touch.</summary>
+        public void SetStickManual(Vec3 value)
+        {
+            float magnitude = MathF.Min(1f, value.FlatLength);
+            Stick.Active = magnitude > 0.01f;
+            Stick.Value = magnitude > 0.01f ? value.Flat.Normalized * magnitude : Vec3.Zero;
+            Stick.Magnitude = magnitude;
+        }
         public void StickUp() => Stick.End();
 
         public void ButtonDown(ActionButton button)

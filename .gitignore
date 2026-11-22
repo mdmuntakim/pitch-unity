@@ -2,8 +2,9 @@
 [Ll]ibrary/
 [Tt]emp/
 [Oo]bj/
-[Bb]uild/
+[Bb]uild/*
 [Bb]uilds/
+!build/export.sh
 [Ll]ogs/
 [Uu]ser[Ss]ettings/
 [Mm]emoryCaptures/

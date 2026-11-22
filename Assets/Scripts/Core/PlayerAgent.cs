@@ -58,6 +58,7 @@ namespace Pitch.Core
         public float SlotZ;
 
         public Vec3 Position;
+        public Vec3 PreviousPosition;
         public Vec3 Velocity;
         public float Facing;
         public Vec3 HomePosition;
@@ -89,6 +90,7 @@ namespace Pitch.Core
         public void ResetForKickOff(Vec3 position)
         {
             Position = position;
+            PreviousPosition = position;
             HomePosition = position;
             Velocity = Vec3.Zero;
             State = PlayerState.Idle;

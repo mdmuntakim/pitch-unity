@@ -136,6 +136,7 @@ namespace Pitch.Core
         public float OffsideTimer { get; private set; }
         public bool HomeUserControlled = true;
         public float MatchRealSeconds { get; private set; }
+        public float InterpolationAlpha => Math.Clamp(_accumulator / FixedDt, 0f, 1f);
         public int FixedSteps { get; private set; }
         public int DebugShootCalls;
         public int DebugPassCalls;
@@ -237,6 +238,9 @@ namespace Pitch.Core
             const float dt = FixedDt;
             FixedSteps++;
             MatchRealSeconds += dt;
+            foreach (var team in new[] { Home, Away })
+                foreach (var p in team.Players)
+                    p.PreviousPosition = p.Position;
             PhaseTime += dt;
             Presentation.Tick(dt);
             Controls.Tick(dt);

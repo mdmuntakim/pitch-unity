@@ -1,0 +1,127 @@
+name: build
+
+# Builds the signed arm64 APK from a clean checkout with pinned versions.
+# One command: bash build/export.sh (see that file for the pinning).
+#
+# Checkpointed continuation: the Unity import cache (Library/) is cached between
+# runs and every job has timeout-minutes: 350, well under GitHub's 6h kill limit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish a release from this run"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  UNITY_VERSION: "6000.0.58f1"
+  PITCH_TOOLS: /opt/unity-tools
+
+jobs:
+  android-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+      UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      UNITY_EDITOR: /opt/unity-tools/Editor/Unity
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Unity import cache (checkpoint)
+        uses: actions/cache@v4
+        with:
+          path: |
+            Library
+            /opt/unity-tools
+          key: pitch-unity-${UNITY_VERSION}-${{ hashFiles('Assets/**', 'Packages/manifest.json', 'ProjectSettings/**', 'tools/**') }}
+          restore-keys: |
+            pitch-unity-${UNITY_VERSION}-
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Unity ${UNITY_VERSION}
+        run: |
+          curl -fsSL -o /tmp/unity-editor.tar.gz "https://download.unity3d.com/releases/${UNITY_VERSION}/Linux64EditorInstaller/Unity.tar.gz"
+          sudo mkdir -p /opt/unity-tools
+          sudo tar -xzf /tmp/unity-editor.tar.gz -C /opt/unity-tools --strip-components=1
+          sudo chmod +x /opt/unity-tools/Editor/Unity
+
+      - name: Activate Unity license
+        run: |
+          mkdir -p "$HOME/.local/share/unity/Unity_licenses"
+          printf '%s' "$UNITY_LICENSE" > "$HOME/.local/share/unity/Unity_licenses/UnityEditor-${UNITY_VERSION}.txt"
+          chmod 600 "$HOME/.local/share/unity/Unity_licenses/UnityEditor-${UNITY_VERSION}.txt"
+          "$UNITY_EDITOR" -quit -batchmode \
+            -projectPath "$PWD" \
+            -executeMethod Pitch.EditorTools.BuildAndroid \
+            -quit -logFile /tmp/unity-activate.log \
+            || { tail -40 /tmp/unity-activate.log; exit 1; }
+
+      - name: Run engine tests (C# headless core)
+        run: dotnet run --project tests/CoreTests
+
+      - name: Build, test and export (one command)
+        run: bash build/export.sh
+
+      - name: APK facts
+        run: |
+          APK=Build/MatchdayEleven-arm64.apk
+          echo "size_bytes=$(wc -c <$APK)" >> "$GITHUB_OUTPUT" || true
+          unzip -l "$APK" | grep "lib/" || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: matchday-eleven-arm64-apk
+          path: Build/MatchdayEleven-arm64.apk
+          if-no-files-found: error
+
+      - name: Publish release (manual runs with publish_release=true, or pushes to main)
+        if: >-
+          github.event_name == 'workflow_dispatch' && inputs.publish_release ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v2.0.${{ github.run_number }}"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Matchday Eleven $TAG" \
+            --notes "Signed arm64-v8a APK built by CI from commit $GITHUB_SHA.
+
+          - Engine: Unity ${UNITY_VERSION} LTS (pinned), URP Forward+ (pinned 17.0.4)
+          - ABI: arm64-v8a only
+          - Signing: project signing key signing/debug.keystore
+          - Engine-side tests: dotnet run --project tests/CoreTests (136 checks)
+
+          ### Checksums (SHA-256)
+          ```
+          $(sha256sum Build/MatchdayEleven-arm64.apk)
+          ```" \
+            Build/MatchdayEleven-arm64.apk
+
+      - name: Attach screenshots when they exist
+        if: >-
+          github.event_name == 'workflow_dispatch' && inputs.publish_release ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v2.0.${{ github.run_number }}"
+          if compgen -G "docs/screenshots/*.png" >/dev/null; then
+            gh release upload "$TAG" docs/screenshots/*.png --repo "$GITHUB_REPOSITORY" --clobber
+          fi
