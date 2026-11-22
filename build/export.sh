@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 UNITY_VERSION="6000.0.58f1"
-UNITY_URL="https://download.unity3d.com/releases/${UNITY_VERSION}/Linux64EditorInstaller/Unity.tar.gz"
+UNITY_URL="https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-6000.0.58f1.tar.xz"
 TOOLS="${PITCH_TOOLS:-$HOME/.cache/pitch-unity-tools}"
 UNITY_EDITOR="${UNITY_EDITOR:-$TOOLS/Unity/Editor/Unity}"
 
@@ -38,12 +38,12 @@ START_EPOCH=$(date +%s)
 # --- engine ----------------------------------------------------------------
 if [ ! -x "$UNITY_EDITOR" ]; then
   log "downloading Unity ${UNITY_VERSION} editor (Linux x86_64)"
-  if [ ! -f "$TOOLS/unity-editor.tar.gz" ]; then
-    curl -fsSL -o "$TOOLS/unity-editor.tar.gz" "$UNITY_URL"
+  if [ ! -f "$TOOLS/unity-editor.tar.xz" ]; then
+    curl -fsSL -o "$TOOLS/unity-editor.tar.xz" "$UNITY_URL"
   fi
   rm -rf "$TOOLS/unity-editor-extracted"
   mkdir -p "$TOOLS/unity-editor-extracted"
-  tar -xzf "$TOOLS/unity-editor.tar.gz" -C "$TOOLS/unity-editor-extracted"
+  tar -xJf "$TOOLS/unity-editor.tar.xz" -C "$TOOLS/unity-editor-extracted"
   mkdir -p "$TOOLS/Unity"
   mv "$TOOLS/unity-editor-extracted/Unity" "$TOOLS/Unity"
   rm -rf "$TOOLS/unity-editor-extracted"

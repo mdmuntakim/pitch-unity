@@ -53,11 +53,23 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Verify Unity licence secrets are present
+        run: |
+          if [ -z "${UNITY_LICENSE:-}" ] || [ -z "${UNITY_EMAIL:-}" ] || [ -z "${UNITY_PASSWORD:-}" ]; then
+            echo "::error::Unity licence activation is unavailable: one or more required repository secrets are not set in mdmuntakim/pitch-unity."
+            echo "Missing/empty secrets:"
+            [ -z "${UNITY_LICENSE:-}" ]   && echo "  - UNITY_LICENSE   (base64-encoded Unity .ulf licence file for this runner)"
+            [ -z "${UNITY_EMAIL:-}" ]     && echo "  - UNITY_EMAIL     (Unity account e-mail)"
+            [ -z "${UNITY_PASSWORD:-}" ]  && echo "  - UNITY_PASSWORD  (Unity account password)"
+            echo "Set them with: gh secret set UNITY_LICENSE --repo mdmuntakim/pitch-unity < licence.ulf.b64"
+            exit 1
+          fi
+
       - name: Install Unity ${UNITY_VERSION}
         run: |
-          curl -fsSL -o /tmp/unity-editor.tar.gz "https://download.unity3d.com/releases/${UNITY_VERSION}/Linux64EditorInstaller/Unity.tar.gz"
+          curl -fsSL -o /tmp/unity-editor.tar.xz "https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-6000.0.58f1.tar.xz"
           sudo mkdir -p /opt/unity-tools
-          sudo tar -xzf /tmp/unity-editor.tar.gz -C /opt/unity-tools --strip-components=1
+          sudo tar -xJf /tmp/unity-editor.tar.xz -C /opt/unity-tools --strip-components=1
           sudo chmod +x /opt/unity-tools/Editor/Unity
 
       - name: Activate Unity license
