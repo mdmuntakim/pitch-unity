@@ -33,6 +33,12 @@ on:
 permissions:
   contents: write
 
+# Container jobs default to `sh`; every step below uses bash arrays and
+# `pipefail`, so pin bash explicitly.
+defaults:
+  run:
+    shell: bash
+
 env:
   UNITY_VERSION: "6000.0.58f1"
   # GameCI images install the editor here; export.sh honours this variable and
