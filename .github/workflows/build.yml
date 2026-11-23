@@ -79,6 +79,21 @@ jobs:
             exit 1
           fi
 
+      - name: Install Unity runtime dependencies
+        run: |
+          sudo apt-get update
+          # Unity 6 links against these even in -nographics batch mode.  Package
+          # names moved in Ubuntu 24.04 (t64 transition), so try both and let
+          # the ldd check below catch anything still missing.
+          for pkg in \
+            libxml2 libgl1 libglu1-mesa libxcursor1 libxrandr2 libxinerama1 \
+            libxi6 libxss1 libxtst6 libxcomposite1 libxdamage1 libxfixes3 \
+            libnss3 libgbm1 libdrm2 libcups2 libasound2 libasound2t64 \
+            libgtk-3-0 libgtk-3-0t64 libatk1.0-0 libatk-bridge2.0-0 \
+            libpango-1.0-0 libcairo2; do
+            sudo apt-get install -y --no-install-recommends "$pkg" || true
+          done
+
       - name: Install Unity ${UNITY_VERSION}
         run: |
           # The Linux editor archive extracts to Editor/ at its root, so it is
@@ -89,6 +104,11 @@ jobs:
             sudo mkdir -p "$PITCH_TOOLS"
             sudo tar -xJf /tmp/unity-editor.tar.xz -C "$PITCH_TOOLS"
             sudo chmod +x "$UNITY_EDITOR"
+          fi
+          if ldd "$UNITY_EDITOR" | grep -q "not found"; then
+            echo "::error::Unity still has missing shared libraries:"
+            ldd "$UNITY_EDITOR" | grep "not found" || true
+            exit 1
           fi
           "$UNITY_EDITOR" -version
 
