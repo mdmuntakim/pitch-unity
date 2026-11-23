@@ -92,14 +92,44 @@ and exports the signed APK through the editor batch build
 CI (`.github/workflows/build.yml`) runs the same pipeline on `ubuntu-latest` with the
 Unity editor and import cache checkpointed between runs, verifies that the APK is
 `arm64-v8a` only and inside the 200–300 MB band, and uploads it as a workflow artifact.
-A **release** (APK + `SHA256SUMS.txt`, screenshots when `docs/screenshots/` has them) is
-published only by a manual run with `publish_release=true`; a push to `main` never
-publishes.
+A **release** (APK + `SHA256SUMS.txt`, stage timings, screenshots) is published only by a
+manual run with `publish_release=true`; a push to `main` never publishes. A push and a
+dispatch for the same commit share a concurrency group, so one commit is never built
+twice.
 
 The job needs three repository secrets, `UNITY_LICENSE` (contents of the `.ulf` licence
 file, raw or base64), `UNITY_EMAIL` and `UNITY_PASSWORD`. If any of them is missing the
 job stops before downloading the editor and names the missing secrets; it never uploads
 a placeholder APK.
+
+### A hang cannot burn hours
+
+The job is bounded at 120 minutes, not at GitHub's 6 hour kill, and every step below is
+timed:
+
+| Stage | Bound | Where it shows |
+| --- | --- | --- |
+| whole job | `timeout-minutes: 120` | workflow |
+| `build/export.sh` | `timeout --signal=INT 75m` | workflow step |
+| one Unity run | `timeout --signal=INT 60m` (25m for the GUI retry) | `build/export.sh` |
+| licence + Android target preflight | 15m, fails in ~1m | `build/export.sh` |
+| screenshot capture (release only) | 15m, `continue-on-error` | workflow |
+
+`bash build/export.sh` prints a `--- stage: name ---` banner and a `[+mm:ss]` prefix on
+every line, times `environment`, `textures`, `engine-tests`, `unity-preflight`,
+`unity-export` and `verify-apk` in `Build/stage-timings.txt`, and runs the editor with
+`-logFile -` through `tools/unity_log.py`, which adds the elapsed time, names the Unity
+stage (import, shader compile, IL2CPP, Gradle) and prints a heartbeat when the editor
+stops writing. On timeout it prints the last 120 lines of the log and writes
+`Build/unity-failure.txt`; the workflow always uploads `Build/logs/` (Unity log,
+preflight log, screenshot log) and the stage timings as the `unity-editor-log` artifact,
+on success, failure and cancellation alike.
+
+Unity 6 refuses a player build in `-batchmode` when the licence lacks the
+`com.unity.editor.headless` entitlement ("Error building player because build target was
+unsupported"). The editor is therefore run on an Xvfb display, and if that entitlement
+error appears within the first seven minutes the script retries once without
+`-batchmode`, with the same timeouts and the same streamed log.
 
 ### Size budget
 

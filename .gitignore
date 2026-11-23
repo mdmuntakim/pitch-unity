@@ -33,3 +33,7 @@ Assets/Generated/**/*.wav
 Assets/Generated/**/*.asset
 !Assets/Generated/.gitkeep
 Local/
+
+# Python bytecode
+__pycache__/
+*.pyc

@@ -12,8 +12,16 @@ name: build
 # publish_release=true. A push to main builds and tests, but never publishes:
 # a release is a deliberate act, not a side effect of a commit.
 #
-# Checkpointed continuation: the Unity import cache (Library/) is cached between
-# runs and every job has timeout-minutes: 350, well under GitHub's 6h kill limit.
+# Bounded time. A hang used to sit inside `BuildPipeline.BuildPlayer` for 5h32m
+# with the editor log redirected to a file nobody could read. Now:
+#   * the job stops at 120 minutes, not at GitHub's 6 hour kill;
+#   * build/export.sh runs the editor under `timeout 60m` (SIGINT), streams the
+#     log with elapsed-time prefixes and stage banners, and prints the last 120
+#     lines when it times out;
+#   * the Unity log, the preflight log and the stage timings are uploaded as an
+#     artifact on success, failure and cancellation alike;
+#   * a push and a dispatch for the same commit share a concurrency group, so a
+#     duplicate build cannot run for the same SHA.
 
 on:
   push:
@@ -33,6 +41,12 @@ on:
 permissions:
   contents: write
 
+# One build per commit: a dispatch right after a push used to run the same
+# commit twice (runs 45101262640 and 45101265416, both stuck for 5h37m).
+concurrency:
+  group: pitch-unity-build-${{ github.sha }}
+  cancel-in-progress: true
+
 # Container jobs default to `sh`; every step below uses bash arrays and
 # `pipefail`, so pin bash explicitly.
 defaults:
@@ -46,11 +60,14 @@ env:
   UNITY_EDITOR: /opt/unity/Editor/Unity
   # The release must sit in the 200-300 MB band: fail, do not warn.
   PITCH_ENFORCE_SIZE: "1"
+  # 4096 pages are what put the ASTC payload (149 MB) in the band. Generation
+  # takes ~35 s and is cached separately; it is not the stall.
+  PITCH_TEXTURE_SIZE: "4096"
 
 jobs:
   android-arm64:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 120
     container:
       image: unityci/editor:ubuntu-6000.0.58f1-android-3
       options: --user root
@@ -68,17 +85,29 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Cache Unity import cache (checkpoint)
+      # Two caches with honest keys. `${{ env.UNITY_VERSION }}` is evaluated by
+      # the workflow, not by the shell: the old key used the literal string
+      # `${UNITY_VERSION}` and never matched, so every run re-imported the whole
+      # project and no run could warm the next one.
+      - name: Cache the Unity import cache
+        id: cache-library
         uses: actions/cache@v4
         with:
-          path: |
-            Library
-            Assets/Resources/Generated
-          key: pitch-unity-${UNITY_VERSION}-${{ hashFiles('Assets/**', 'Packages/manifest.json', 'ProjectSettings/**', 'tools/**') }}
+          path: Library
+          key: pitch-unity-library-${{ env.UNITY_VERSION }}-${{ hashFiles('Packages/manifest.json', 'ProjectSettings/**') }}
           restore-keys: |
-            pitch-unity-${UNITY_VERSION}-
+            pitch-unity-library-${{ env.UNITY_VERSION }}-
 
-      - name: Verify the editor and its native libraries
+      - name: Cache the generated texture set
+        id: cache-textures
+        uses: actions/cache@v4
+        with:
+          path: Assets/Resources/Generated
+          key: pitch-unity-textures-${{ hashFiles('tools/asset_generator.py') }}-${{ env.PITCH_TEXTURE_SIZE }}
+          restore-keys: |
+            pitch-unity-textures-
+
+      - name: Verify the editor, its native libraries and the Android module
         run: |
           # The image is the source of truth for the editor and every shared
           # library it needs. Fail here, not after a 12 minute build, if the
@@ -92,7 +121,21 @@ jobs:
             ldd "$UNITY_EDITOR" | grep "not found" || true
             exit 1
           fi
+          DATA_DIR="$(dirname "$UNITY_EDITOR")/Data"
+          test -d "$DATA_DIR/PlaybackEngines/AndroidPlayer" || {
+            echo "::error::the Android build support module is missing from $DATA_DIR/PlaybackEngines"
+            ls -1 "$DATA_DIR/PlaybackEngines" 2>/dev/null || true
+            exit 1
+          }
           "$UNITY_EDITOR" -version
+          # Unity needs a display. xvfb-run is the virtual one; install it only
+          # when the image does not ship it.
+          if ! command -v xvfb-run >/dev/null; then
+            echo "Installing xvfb and the software GL stack (missing from the image)"
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0
+          fi
+          xvfb-run --help >/dev/null && echo "xvfb-run available"
 
       - name: Verify Unity licence secrets are present
         run: |
@@ -102,10 +145,6 @@ jobs:
             echo "Using Unity account credentials (no .ulf file)."
           else
             echo "::error::Unity licence activation is unavailable: set UNITY_LICENSE or both UNITY_EMAIL and UNITY_PASSWORD in mdmuntakim/pitch-unity. No APK can be built and no release is published."
-            echo "Set them with:"
-            echo "  gh secret set UNITY_LICENSE  --repo mdmuntakim/pitch-unity < Unity_lic.ulf"
-            echo "  gh secret set UNITY_EMAIL    --repo mdmuntakim/pitch-unity"
-            echo "  gh secret set UNITY_PASSWORD --repo mdmuntakim/pitch-unity"
             exit 1
           fi
 
@@ -135,9 +174,9 @@ jobs:
             if [ -n "${UNITY_SERIAL:-}" ]; then
               args+=(-serial "$UNITY_SERIAL")
             fi
-            if ! "$UNITY_EDITOR" "${args[@]}" -logFile /tmp/unity-activate.log; then
+            if ! timeout --signal=INT 10m "$UNITY_EDITOR" "${args[@]}" -logFile /tmp/unity-activate.log; then
               tail -80 /tmp/unity-activate.log || true
-              echo "::error::Unity account activation failed (see the log above)."
+              echo "::error::Unity account activation failed or timed out (see the log above)."
               exit 1
             fi
             if grep -qiE "No valid Unity Editor license|License is not active|Failed to activate|Unable to activate" /tmp/unity-activate.log; then
@@ -147,19 +186,16 @@ jobs:
             fi
             echo "Unity account activation completed."
           fi
-          # Verify the licence without building anything: a batch-mode import.
-          if ! "$UNITY_EDITOR" -batchmode -quit -nographics \
-                 -projectPath "$PWD" -logFile /tmp/unity-licence-check.log; then
-            tail -60 /tmp/unity-licence-check.log || true
-            echo "::error::Unity could not start with the supplied licence (see the log above)."
-            exit 1
-          fi
 
-      - name: Run engine tests (C# headless core)
-        run: dotnet run --project tests/CoreTests
+      - name: Prepare log directory
+        run: mkdir -p Build/logs
 
+      # The licence and the Android target are verified by the preflight inside
+      # export.sh, on the same editor that performs the build, so a missing
+      # licence fails in about a minute instead of after an hour. The outer
+      # timeout is the backstop: it stops the whole command at 75 minutes.
       - name: Build, test and export (one command)
-        run: bash build/export.sh
+        run: timeout --signal=INT 75m bash build/export.sh
 
       - name: Verify APK is arm64-v8a only and 200-300 MB
         run: |
@@ -186,7 +222,57 @@ jobs:
             Build/MatchdayEleven-arm64.apk
             Build/build-facts.txt
             Build/SHA256SUMS.txt
+            Build/report.json
+            Build/stage-timings.txt
           if-no-files-found: error
+
+      # Also runs when the build failed, timed out or the run was cancelled:
+      # the log is the first thing needed to diagnose a hang.
+      - name: Upload Unity log and stage timings (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unity-editor-log
+          path: |
+            Build/logs/**
+            Build/unity-failure.txt
+          if-no-files-found: warn
+
+      # Keep the import cache warm even after a failed or timed-out attempt, so
+      # the next run starts from the checkpoint instead of from an empty Library.
+      - name: Save the Unity import cache after a failed build
+        if: always() && steps.cache-library.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: Library
+          key: ${{ steps.cache-library.outputs.cache-primary-key }}
+
+      - name: Save the texture cache after a failed build
+        if: always() && steps.cache-textures.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: Assets/Resources/Generated
+          key: ${{ steps.cache-textures.outputs.cache-primary-key }}
+
+      # Screenshots come from the game itself, played in the editor on the
+      # virtual display (no Android device on a hosted runner). Bounded and
+      # non-blocking: a release is never lost because the capture failed.
+      - name: Capture release screenshots
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        timeout-minutes: 20
+        continue-on-error: true
+        env:
+          PITCH_SHOTS: "1"
+          PITCH_SCREENSHOTS: "1"
+        run: |
+          mkdir -p docs/screenshots Build/logs
+          timeout --signal=INT --kill-after=2m 15m \
+            xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+            "$UNITY_EDITOR" -batchmode -accept-apiupdate -projectPath "$PWD" \
+            -executeMethod Pitch.EditorTools.Screenshots.Capture -logFile - \
+            2>&1 | python3 tools/unity_log.py \
+              --log Build/logs/unity-screenshots.log --idle-warn 120
+          ls -l docs/screenshots || true
 
       - name: Install GitHub CLI
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release
@@ -209,6 +295,13 @@ jobs:
           BYTES=$(stat -c%s "$APK")
           MIB=$(awk -v b="$BYTES" 'BEGIN{printf "%.1f", b/1048576}')
           ABIS=$(awk -F': ' '/^abis:/{print $2}' Build/build-facts.txt)
+          shopt -s nullglob
+          shots=(docs/screenshots/*.png)
+          # The checksums file covers everything that is published.
+          (cd Build && sha256sum "$(basename "$APK")") > Build/SHA256SUMS.txt
+          for shot in "${shots[@]}"; do
+            (cd docs/screenshots && sha256sum "$(basename "$shot")") >> Build/SHA256SUMS.txt
+          done
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::release $TAG already exists; a published release is never overwritten"
@@ -231,13 +324,21 @@ jobs:
           \`\`\`
           $(cat Build/SHA256SUMS.txt)
           \`\`\`
+
+          ### Stage timings
+          \`\`\`
+          $(cat Build/stage-timings.txt)
+          \`\`\`
           EOF
 
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Matchday Eleven $TAG" \
             --notes-file /tmp/notes.md \
-            "$APK" Build/SHA256SUMS.txt
+            "$APK" Build/SHA256SUMS.txt Build/stage-timings.txt
+          if [ ${#shots[@]} -gt 0 ]; then
+            gh release upload "$TAG" "${shots[@]}" --repo "$GITHUB_REPOSITORY"
+          fi
           echo "released: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
 
       - name: Attach screenshots when they exist
