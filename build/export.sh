@@ -75,12 +75,21 @@ dotnet run --project tests/CoreTests 2>&1 | tail -20
 
 # --- export ----------------------------------------------------------------
 log "exporting signed Android arm64 APK with Unity ${UNITY_VERSION}"
-PITCH_OUTPUT="$APK" "$UNITY_EDITOR" \
-  -batchmode -quit -projectPath "$PWD" \
+# A previous batch-mode run can leave a lock behind; the container has no
+# display, so the editor must run with -nographics.
+rm -f Temp/UnityLockfile
+if ! PITCH_OUTPUT="$APK" "$UNITY_EDITOR" \
+  -batchmode -nographics -quit -projectPath "$PWD" \
   -executeMethod Pitch.EditorTools.BuildAndroid.BuildFromCli \
-  -logFile "$TOOLS/unity-editor-export.log"
+  -logFile "$TOOLS/unity-editor-export.log"; then
+  echo "Unity export failed; last 120 lines of $TOOLS/unity-editor-export.log:"
+  tail -120 "$TOOLS/unity-editor-export.log" || true
+  exit 1
+fi
 if [ ! -f "$APK" ]; then
-  echo "the Unity build did not produce $APK"; exit 1
+  echo "the Unity build did not produce $APK"
+  tail -120 "$TOOLS/unity-editor-export.log" || true
+  exit 1
 fi
 
 END_EPOCH=$(date +%s)
