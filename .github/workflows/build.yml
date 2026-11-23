@@ -3,6 +3,10 @@ name: build
 # Builds the signed arm64 APK from a clean checkout with pinned versions.
 # One command: bash build/export.sh (see that file for the pinning).
 #
+# The APK release is only published by a manual dispatch with
+# publish_release=true. A push to main builds and tests, but never publishes:
+# a release is a deliberate act, not a side effect of a commit.
+#
 # Checkpointed continuation: the Unity import cache (Library/) is cached between
 # runs and every job has timeout-minutes: 350, well under GitHub's 6h kill limit.
 
@@ -13,9 +17,13 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publish a release from this run"
+        description: "Publish the signed APK release (needs the Unity licence secrets)"
         type: boolean
         default: false
+      release_tag:
+        description: "Release tag to publish under"
+        type: string
+        default: "v2.0.0"
 
 permissions:
   contents: write
@@ -23,6 +31,8 @@ permissions:
 env:
   UNITY_VERSION: "6000.0.58f1"
   PITCH_TOOLS: /opt/unity-tools
+  # The release must sit in the 200-300 MB band: fail, do not warn.
+  PITCH_ENFORCE_SIZE: "1"
 
 jobs:
   android-arm64:
@@ -37,7 +47,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache Unity import cache (checkpoint)
+      - name: Cache Unity editor and import cache (checkpoint)
         uses: actions/cache@v4
         with:
           path: |
@@ -55,33 +65,67 @@ jobs:
 
       - name: Verify Unity licence secrets are present
         run: |
-          if [ -z "${UNITY_LICENSE:-}" ] || [ -z "${UNITY_EMAIL:-}" ] || [ -z "${UNITY_PASSWORD:-}" ]; then
-            echo "::error::Unity licence activation is unavailable: one or more required repository secrets are not set in mdmuntakim/pitch-unity."
-            echo "Missing/empty secrets:"
-            [ -z "${UNITY_LICENSE:-}" ]   && echo "  - UNITY_LICENSE   (base64-encoded Unity .ulf licence file for this runner)"
-            [ -z "${UNITY_EMAIL:-}" ]     && echo "  - UNITY_EMAIL     (Unity account e-mail)"
-            [ -z "${UNITY_PASSWORD:-}" ]  && echo "  - UNITY_PASSWORD  (Unity account password)"
-            echo "Set them with: gh secret set UNITY_LICENSE --repo mdmuntakim/pitch-unity < licence.ulf.b64"
+          missing=0
+          if [ -z "${UNITY_LICENSE:-}" ]; then
+            echo "  - UNITY_LICENSE   (contents of the .ulf licence file, or its base64)"
+            missing=1
+          fi
+          if [ -z "${UNITY_EMAIL:-}" ]; then
+            echo "  - UNITY_EMAIL     (Unity account e-mail)"
+            missing=1
+          fi
+          if [ -z "${UNITY_PASSWORD:-}" ]; then
+            echo "  - UNITY_PASSWORD  (Unity account password)"
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Unity licence activation is unavailable: the secrets listed above are not set in mdmuntakim/pitch-unity. No APK can be built and no release is published."
+            echo "Set them with:"
+            echo "  gh secret set UNITY_LICENSE  --repo mdmuntakim/pitch-unity < Unity_lic.ulf"
+            echo "  gh secret set UNITY_EMAIL    --repo mdmuntakim/pitch-unity"
+            echo "  gh secret set UNITY_PASSWORD --repo mdmuntakim/pitch-unity"
             exit 1
           fi
 
       - name: Install Unity ${UNITY_VERSION}
         run: |
-          curl -fsSL -o /tmp/unity-editor.tar.xz "https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-6000.0.58f1.tar.xz"
-          sudo mkdir -p /opt/unity-tools
-          sudo tar -xJf /tmp/unity-editor.tar.xz -C /opt/unity-tools --strip-components=1
-          sudo chmod +x /opt/unity-tools/Editor/Unity
+          # The Linux editor archive extracts to Editor/ at its root, so it is
+          # unpacked directly into PITCH_TOOLS: $PITCH_TOOLS/Editor/Unity.
+          if [ ! -x "$UNITY_EDITOR" ]; then
+            curl -fsSL -o /tmp/unity-editor.tar.xz \
+              "https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-${UNITY_VERSION}.tar.xz"
+            sudo mkdir -p "$PITCH_TOOLS"
+            sudo tar -xJf /tmp/unity-editor.tar.xz -C "$PITCH_TOOLS"
+            sudo chmod +x "$UNITY_EDITOR"
+          fi
+          "$UNITY_EDITOR" -version
 
-      - name: Activate Unity license
+      - name: Activate Unity licence
         run: |
-          mkdir -p "$HOME/.local/share/unity/Unity_licenses"
-          printf '%s' "$UNITY_LICENSE" > "$HOME/.local/share/unity/Unity_licenses/UnityEditor-${UNITY_VERSION}.txt"
-          chmod 600 "$HOME/.local/share/unity/Unity_licenses/UnityEditor-${UNITY_VERSION}.txt"
-          "$UNITY_EDITOR" -quit -batchmode \
-            -projectPath "$PWD" \
-            -executeMethod Pitch.EditorTools.BuildAndroid \
-            -quit -logFile /tmp/unity-activate.log \
-            || { tail -40 /tmp/unity-activate.log; exit 1; }
+          # The .ulf is accepted either raw (starts with <?xml) or base64-encoded.
+          if printf '%s' "$UNITY_LICENSE" | head -c 5 | grep -qF '<?xml'; then
+            printf '%s\n' "$UNITY_LICENSE" > /tmp/Unity_lic.ulf
+          else
+            printf '%s' "$UNITY_LICENSE" | base64 -d > /tmp/Unity_lic.ulf
+          fi
+          grep -q '<UnityLicense' /tmp/Unity_lic.ulf || {
+            echo "::error::UNITY_LICENSE is not a Unity .ulf licence file (neither XML nor base64-encoded XML)."
+            exit 1
+          }
+          # Unity 6 on Linux reads licences from both of these locations.
+          for dir in "$HOME/.local/share/unity3/Unity_licenses" "$HOME/.local/share/unity3d/Unity"; do
+            mkdir -p "$dir"
+            cp /tmp/Unity_lic.ulf "$dir/Unity_licenses.ulf"
+            cp /tmp/Unity_lic.ulf "$dir/Unity_lic.ulf"
+            chmod 600 "$dir"/*.ulf
+          done
+          # Verify the licence without building anything: a batch-mode import.
+          if ! "$UNITY_EDITOR" -batchmode -quit -nographics \
+                 -projectPath "$PWD" -logFile /tmp/unity-licence-check.log; then
+            tail -60 /tmp/unity-licence-check.log || true
+            echo "::error::Unity could not start with the supplied licence (see the log above)."
+            exit 1
+          fi
 
       - name: Run engine tests (C# headless core)
         run: dotnet run --project tests/CoreTests
@@ -89,51 +133,85 @@ jobs:
       - name: Build, test and export (one command)
         run: bash build/export.sh
 
-      - name: APK facts
+      - name: Verify APK is arm64-v8a only and 200-300 MB
         run: |
           APK=Build/MatchdayEleven-arm64.apk
-          echo "size_bytes=$(wc -c <$APK)" >> "$GITHUB_OUTPUT" || true
-          unzip -l "$APK" | grep "lib/" || true
+          test -f "$APK" || { echo "::error::$APK was not produced"; exit 1; }
+          cat Build/build-facts.txt
+          grep -q '^only_arm64: True' Build/build-facts.txt || {
+            echo "::error::the APK is not arm64-v8a only"; exit 1;
+          }
+          grep -q '^size_in_200_300_mb: True' Build/build-facts.txt || {
+            echo "::error::the APK is outside the required 200-300 MB band"; exit 1;
+          }
+          BYTES=$(stat -c%s "$APK")
+          echo "APK bytes: $BYTES ($(awk -v b="$BYTES" 'BEGIN{printf "%.1f", b/1048576}') MiB)"
+          # Checksums use the bare file name so `sha256sum -c SHA256SUMS.txt`
+          # works in the directory where the release assets were downloaded.
+          (cd Build && sha256sum "$(basename "$APK")") | tee Build/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: matchday-eleven-arm64-apk
-          path: Build/MatchdayEleven-arm64.apk
+          path: |
+            Build/MatchdayEleven-arm64.apk
+            Build/build-facts.txt
+            Build/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Publish release (manual runs with publish_release=true, or pushes to main)
-        if: >-
-          github.event_name == 'workflow_dispatch' && inputs.publish_release ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      - name: Publish release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
         run: |
-          TAG="v2.0.${{ github.run_number }}"
+          APK=Build/MatchdayEleven-arm64.apk
+          SHA=$(cut -d' ' -f1 Build/SHA256SUMS.txt)
+          BYTES=$(stat -c%s "$APK")
+          MIB=$(awk -v b="$BYTES" 'BEGIN{printf "%.1f", b/1048576}')
+          ABIS=$(awk -F': ' '/^abis:/{print $2}' Build/build-facts.txt)
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; a published release is never overwritten"
+            exit 1
+          fi
+
+          cat > /tmp/notes.md <<EOF
+          Signed arm64-v8a APK built by CI from commit \`$GITHUB_SHA\`.
+
+          | Fact | Value |
+          | --- | --- |
+          | ABI | \`$ABIS\` (arm64-v8a only) |
+          | Size | $BYTES bytes ($MIB MiB, inside the 200-300 MB band) |
+          | SHA-256 | \`$SHA\` |
+          | Unity | ${UNITY_VERSION} LTS (pinned), URP Forward+ 17.0.4 |
+          | Signing | project key \`signing/debug.keystore\` |
+          | Engine tests | \`dotnet run --project tests/CoreTests\` - 136 checks passed |
+
+          ### Checksums (SHA-256)
+          \`\`\`
+          $(cat Build/SHA256SUMS.txt)
+          \`\`\`
+          EOF
+
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Matchday Eleven $TAG" \
-            --notes "Signed arm64-v8a APK built by CI from commit $GITHUB_SHA.
-
-          - Engine: Unity ${UNITY_VERSION} LTS (pinned), URP Forward+ (pinned 17.0.4)
-          - ABI: arm64-v8a only
-          - Signing: project signing key signing/debug.keystore
-          - Engine-side tests: dotnet run --project tests/CoreTests (136 checks)
-
-          ### Checksums (SHA-256)
-          ```
-          $(sha256sum Build/MatchdayEleven-arm64.apk)
-          ```" \
-            Build/MatchdayEleven-arm64.apk
+            --notes-file /tmp/notes.md \
+            "$APK" Build/SHA256SUMS.txt
+          echo "released: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
 
       - name: Attach screenshots when they exist
-        if: >-
-          github.event_name == 'workflow_dispatch' && inputs.publish_release ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
         run: |
-          TAG="v2.0.${{ github.run_number }}"
-          if compgen -G "docs/screenshots/*.png" >/dev/null; then
-            gh release upload "$TAG" docs/screenshots/*.png --repo "$GITHUB_REPOSITORY" --clobber
+          shopt -s nullglob
+          shots=(docs/screenshots/*.png)
+          if [ ${#shots[@]} -eq 0 ]; then
+            echo "No screenshots captured for this build (docs/screenshots is empty); nothing to attach."
+            exit 0
           fi
+          gh release upload "$TAG" "${shots[@]}" --repo "$GITHUB_REPOSITORY" --clobber

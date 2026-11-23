@@ -90,8 +90,16 @@ and exports the signed APK through the editor batch build
 `Build/report.json` (bytes, SHA-256, ABIs, size band, build seconds).
 
 CI (`.github/workflows/build.yml`) runs the same pipeline on `ubuntu-latest` with the
-Unity import cache checkpointed between runs, exports the signed arm64 APK and publishes
-it as a release with checksums and source archive.
+Unity editor and import cache checkpointed between runs, verifies that the APK is
+`arm64-v8a` only and inside the 200–300 MB band, and uploads it as a workflow artifact.
+A **release** (APK + `SHA256SUMS.txt`, screenshots when `docs/screenshots/` has them) is
+published only by a manual run with `publish_release=true`; a push to `main` never
+publishes.
+
+The job needs three repository secrets, `UNITY_LICENSE` (contents of the `.ulf` licence
+file, raw or base64), `UNITY_EMAIL` and `UNITY_PASSWORD`. If any of them is missing the
+job stops before downloading the editor and names the missing secrets; it never uploads
+a placeholder APK.
 
 ### Size budget
 

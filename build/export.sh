@@ -26,7 +26,7 @@ cd "$(dirname "$0")/.."
 UNITY_VERSION="6000.0.58f1"
 UNITY_URL="https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-6000.0.58f1.tar.xz"
 TOOLS="${PITCH_TOOLS:-$HOME/.cache/pitch-unity-tools}"
-UNITY_EDITOR="${UNITY_EDITOR:-$TOOLS/Unity/Editor/Unity}"
+UNITY_EDITOR="${UNITY_EDITOR:-$TOOLS/Editor/Unity}"
 
 APK="${PITCH_OUTPUT:-Build/MatchdayEleven-arm64.apk}"
 
@@ -36,20 +36,19 @@ mkdir -p "$TOOLS" "$(dirname "$APK")"
 START_EPOCH=$(date +%s)
 
 # --- engine ----------------------------------------------------------------
+# The Linux editor archive extracts to Editor/ at its root, so it is unpacked
+# directly into $TOOLS: the binary is $TOOLS/Editor/Unity.
 if [ ! -x "$UNITY_EDITOR" ]; then
-  log "downloading Unity ${UNITY_VERSION} editor (Linux x86_64)"
+  log "downloading Unity ${UNITY_VERSION} editor (Linux x86_64, ~4.2 GiB)"
   if [ ! -f "$TOOLS/unity-editor.tar.xz" ]; then
-    curl -fsSL -o "$TOOLS/unity-editor.tar.xz" "$UNITY_URL"
+    curl -fsSL -o "$TOOLS/unity-editor.tar.xz.part" "$UNITY_URL"
+    mv "$TOOLS/unity-editor.tar.xz.part" "$TOOLS/unity-editor.tar.xz"
   fi
-  rm -rf "$TOOLS/unity-editor-extracted"
-  mkdir -p "$TOOLS/unity-editor-extracted"
-  tar -xJf "$TOOLS/unity-editor.tar.xz" -C "$TOOLS/unity-editor-extracted"
-  mkdir -p "$TOOLS/Unity"
-  mv "$TOOLS/unity-editor-extracted/Unity" "$TOOLS/Unity"
-  rm -rf "$TOOLS/unity-editor-extracted"
-  chmod +x "$TOOLS/Unity/Editor/Unity"
+  log "extracting the editor"
+  tar -xJf "$TOOLS/unity-editor.tar.xz" -C "$TOOLS"
+  chmod +x "$TOOLS/Editor/Unity"
 fi
-UNITY_EDITOR="${UNITY_EDITOR:-$TOOLS/Unity/Editor/Unity}"
+UNITY_EDITOR="${UNITY_EDITOR:-$TOOLS/Editor/Unity}"
 
 # --- signing key -----------------------------------------------------------
 export PITCH_KEYSTORE="${PITCH_KEYSTORE:-$PWD/signing/debug.keystore}"
@@ -73,8 +72,8 @@ dotnet run --project tests/CoreTests 2>&1 | tail -20
 log "exporting signed Android arm64 APK with Unity ${UNITY_VERSION}"
 PITCH_OUTPUT="$APK" "$UNITY_EDITOR" \
   -batchmode -quit -projectPath "$PWD" \
-  -executeMethod Pitch.EditorTools.BuildAndroid \
-  -quit -logFile "$TOOLS/unity-editor-export.log"
+  -executeMethod Pitch.EditorTools.BuildAndroid.BuildFromCli \
+  -logFile "$TOOLS/unity-editor-export.log"
 if [ ! -f "$APK" ]; then
   echo "the Unity build did not produce $APK"; exit 1
 fi
