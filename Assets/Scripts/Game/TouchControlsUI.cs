@@ -34,6 +34,24 @@ namespace Pitch.Game
 
         private ControlSettings Settings => _match != null ? _match.Controls.Settings : new ControlSettings();
 
+        /// <summary>Live settings object; the menu reads it to draw the toggles.</summary>
+        public ControlSettings CurrentSettings => Settings;
+
+        public void SetHaptics(bool enabled)
+        {
+            if (_match == null) return;
+            Settings.Haptics = enabled;
+            SaveSettings();
+        }
+
+        public void SetBallHighlight(bool enabled)
+        {
+            if (_match == null) return;
+            Settings.BallHighlight = enabled;
+            _match.Presentation.BallHighlight = enabled;
+            SaveSettings();
+        }
+
         public void Initialise(MatchEngine match, BroadcastHUD hud)
         {
             _match = match;
