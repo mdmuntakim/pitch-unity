@@ -27,8 +27,8 @@
 #                       cached by the workflow)
 #   PITCH_UNITY_TIMEOUT timeout for one Unity run (default 60m)
 #   PITCH_UNITY_MODE    batch | gui | auto        (default auto: batch mode
-#                       first, one GUI retry if the licence lacks the headless
-#                       entitlement)
+#                       first, the interactive editor only when batch mode is
+#                       unusable for a reason other than the licence)
 #   PITCH_UNITY_LOG     Unity log file            (default $PITCH_TOOLS/unity-editor-export.log)
 # ============================================================================
 set -euo pipefail
@@ -147,6 +147,25 @@ begin_stage engine-tests
 dotnet run --project tests/CoreTests 2>&1 | tail -20
 end_stage
 
+# Print what Unity actually put on disk, without secrets: this is the
+# difference between "the licence is missing" and "the licence exists but the
+# account has no headless entitlement".
+licence_report() {
+  local dir file
+  for dir in "$HOME/.config/unity3d/Unity" "$HOME/.local/share/unity3d/Unity" \
+             "$HOME/.local/share/unity3/Unity_licenses" "$HOME/.config/unity3d"; do
+    [ -d "$dir" ] || continue
+    log "licence directory: $dir"
+    ls -l "$dir" 2>/dev/null | sed 's/^/    /' || true
+    file="$dir/UnityEntitlementLicense.xml"
+    if [ -f "$file" ]; then
+      grep -oE "<(UpdateDate|LicenseType|SerialMasked|ProductName|StopDate)>[^<]*" "$file" \
+        | sed 's/^/    /' || true
+      grep -oE "com\.unity\.[A-Za-z0-9._-]+" "$file" | sort -u | sed 's/^/    entitlement: /' || true
+    fi
+  done
+}
+
 # --- licence / target preflight --------------------------------------------
 # Fail before the long build, not after it. Two cheap editor runs (about 10 s
 # each once Library/ exists) prove that the licence is active and report
@@ -209,8 +228,16 @@ if [ "$UNITY_MODE" = "auto" ] || [ "$UNITY_MODE" = "batch" ]; then
   elif [ "$UNITY_MODE" = "batch" ]; then
     log "::error::the Android build target is unusable in batch mode (see the log above)"
     exit 1
+  elif grep -q "com.unity.editor.headless" "$PREFLIGHT_LOG"; then
+    # The interactive editor cannot build either: it blocks on startup on this
+    # runner (that is the 5h32m hang), and the entitlement decision is made by
+    # the licensing service for the account, not by a command-line flag.
+    log "licence report:"
+    licence_report
+    log "::error::the Unity account used by this workflow has no 'com.unity.editor.headless' entitlement, so no player build is possible. The editor starts (import works) but BuildPipeline refuses the Android target. Use a licence that grants it: a serial-activated licence (UNITY_SERIAL + UNITY_EMAIL + UNITY_PASSWORD) or a matching .ulf in UNITY_LICENSE. Account-only Personal activation returns 'Found 0 entitlement groups' and cannot build."
+    exit 1
   else
-    log "batch mode reports the Android target unusable (Personal licence without com.unity.editor.headless); probing the interactive mode"
+    log "batch mode reports the Android target unusable; probing the interactive mode (bounded)"
   fi
 fi
 
@@ -219,16 +246,13 @@ if [ "$UNITY_MODE" = "auto" ] || [ "$UNITY_MODE" = "gui" ]; then
   if [ "$PREFLIGHT_RC" -ne 0 ]; then
     echo "=== last 60 lines of $PREFLIGHT_LOG_GUI ==="
     tail -60 "$PREFLIGHT_LOG_GUI" || true
-    log "::error::the Unity editor cannot start on the virtual display (exit $PREFLIGHT_RC)"
+    log "licence report:"
+    licence_report
+    log "::error::the interactive Unity editor does not start on the virtual display (exit $PREFLIGHT_RC); this is the configuration that hung for 5h32m in runs 45101262640 and 45101265416"
     exit 1
   fi
-  if [ "$PROBE_SUPPORTED" = "true" ]; then
-    UNITY_MODE=gui
-  else
-    # The target check itself can be blocked by the missing headless
-    # entitlement even outside batch mode. The build below is bounded and
-    # streamed, so try it and let BuildPlayer report the real reason.
-    UNITY_MODE=gui
+  UNITY_MODE=gui
+  if [ "$PROBE_SUPPORTED" != "true" ]; then
     log "warning: the Android target still reports unsupported; attempting the bounded GUI build anyway"
   fi
 fi

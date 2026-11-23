@@ -97,10 +97,18 @@ manual run with `publish_release=true`; a push to `main` never publishes. A push
 dispatch for the same commit share a concurrency group, so one commit is never built
 twice.
 
-The job needs three repository secrets, `UNITY_LICENSE` (contents of the `.ulf` licence
-file, raw or base64), `UNITY_EMAIL` and `UNITY_PASSWORD`. If any of them is missing the
-job stops before downloading the editor and names the missing secrets; it never uploads
-a placeholder APK.
+The job needs `UNITY_LICENSE` (contents of a `.ulf` licence file, raw or base64) or
+`UNITY_EMAIL` + `UNITY_PASSWORD`. If any of them is missing the job stops before
+downloading the editor and names the missing secrets; it never uploads a placeholder APK.
+
+The licence itself must grant `com.unity.editor.headless`: Unity 6 asks for that
+entitlement for every `-batchmode` player build, and an account-only Personal activation
+that returns `Found 0 entitlement groups` / `'com.unity.editor.headless' was not found`
+cannot build an APK at all (the editor imports the project, then
+`BuildPipeline.IsBuildTargetSupported` is false). A serial-activated licence
+(`UNITY_SERIAL` + `UNITY_EMAIL` + `UNITY_PASSWORD`) or a matching `.ulf` in
+`UNITY_LICENSE` is required. The preflight prints this diagnosis, and the licence
+artifacts Unity wrote, in about a minute; it does not start the long build.
 
 ### A hang cannot burn hours
 
