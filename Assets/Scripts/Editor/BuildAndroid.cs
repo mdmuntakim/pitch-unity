@@ -27,6 +27,26 @@ namespace Pitch.EditorTools
         [MenuItem("Pitch/2. Build signed arm64 APK")]
         public static void BuildFromMenu() => Build();
 
+        /// <summary>
+        /// Cheap preflight for CI, run before the long build: proves the editor
+        /// starts with the active licence and that the Android target is usable.
+        /// Prints one machine readable PROBE line for the workflow and exits
+        /// non-zero when the target is missing, so the job fails in a minute
+        /// instead of after an hour.
+        /// </summary>
+        public static void Probe()
+        {
+            bool supported = BuildPipeline.IsBuildTargetSupported(BuildTargetGroup.Android, BuildTarget.Android);
+            Debug.Log($"[Pitch] PROBE unity={Application.unityVersion} batch={Application.isBatchMode} " +
+                      $"graphics={SystemInfo.graphicsDeviceType} android_supported={supported.ToString().ToLowerInvariant()}");
+            string engines = Path.Combine(EditorApplication.applicationContentsPath, "PlaybackEngines");
+            Debug.Log($"[Pitch] PROBE playback_engines={engines} " +
+                      $"androidplayer={Directory.Exists(Path.Combine(engines, "AndroidPlayer")).ToString().ToLowerInvariant()}");
+            if (!supported)
+                Debug.LogError("[Pitch] PROBE the Android build target is not supported by this editor/installation");
+            EditorApplication.Exit(supported ? 0 : 3);
+        }
+
         /// <summary>Entry point for -executeMethod from CI.</summary>
         public static void BuildFromCli()
         {
@@ -84,13 +104,15 @@ namespace Pitch.EditorTools
                                  "the build will use flat fallback materials and will not reach the size target");
                 return;
             }
-            Debug.Log("[Pitch] generating deterministic PBR texture set (this takes a few minutes)");
+            string size = Environment.GetEnvironmentVariable("PITCH_TEXTURE_SIZE");
+            if (string.IsNullOrEmpty(size)) size = "4096";
+            Debug.Log($"[Pitch] generating deterministic PBR texture set at {size}px");
             var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "python3",
-                    Arguments = $"\"{script}\" --out Assets/Resources/Generated/Textures --size 4096",
+                    Arguments = $"\"{script}\" --out Assets/Resources/Generated/Textures --size {size}",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
