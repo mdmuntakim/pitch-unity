@@ -64,6 +64,15 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Keep the 2.4 GB editor across failed runs too.  The main cache step is
+      # only saved when the job succeeds, which made every failed iteration pay
+      # the download again.
+      - name: Restore cached Unity editor
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/unity-tools
+          key: unity-editor-6000.0.58f1-v1
+
       - name: Verify Unity licence secrets are present
         run: |
           if [ -n "${UNITY_LICENSE:-}" ]; then
@@ -86,7 +95,7 @@ jobs:
           # names moved in Ubuntu 24.04 (t64 transition), so try both and let
           # the ldd check below catch anything still missing.
           for pkg in \
-            libxml2 libgl1 libglu1-mesa libxcursor1 libxrandr2 libxinerama1 \
+            libxml2t64 libxml2 libgl1 libglu1-mesa libxcursor1 libxrandr2 libxinerama1 \
             libxi6 libxss1 libxtst6 libxcomposite1 libxdamage1 libxfixes3 \
             libnss3 libgbm1 libdrm2 libcups2 libasound2 libasound2t64 \
             libgtk-3-0 libgtk-3-0t64 libatk1.0-0 libatk-bridge2.0-0 \
@@ -111,6 +120,14 @@ jobs:
             exit 1
           fi
           "$UNITY_EDITOR" -version
+
+      - name: Save cached Unity editor
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/unity-tools
+          key: unity-editor-6000.0.58f1-v1
 
       - name: Activate Unity licence
         run: |
