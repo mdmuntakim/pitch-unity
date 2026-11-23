@@ -26,6 +26,11 @@ cd "$(dirname "$0")/.."
 UNITY_VERSION="6000.0.58f1"
 UNITY_URL="https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-6000.0.58f1.tar.xz"
 TOOLS="${PITCH_TOOLS:-$HOME/.cache/pitch-unity-tools}"
+# CI runs in the official GameCI image, which already ships the pinned editor
+# at /opt/unity/Editor/Unity. Prefer it and never download a second copy.
+if [ -z "${UNITY_EDITOR:-}" ] && [ -x /opt/unity/Editor/Unity ]; then
+  UNITY_EDITOR=/opt/unity/Editor/Unity
+fi
 UNITY_EDITOR="${UNITY_EDITOR:-$TOOLS/Editor/Unity}"
 
 APK="${PITCH_OUTPUT:-Build/MatchdayEleven-arm64.apk}"
@@ -59,8 +64,8 @@ export PITCH_KEYPASS="${PITCH_KEYPASS:-android}"
 # --- generated assets ------------------------------------------------------
 if [ ! -f Assets/Resources/Generated/Textures/grass_albedo.png ]; then
   log "generating deterministic PBR texture set (takes a few minutes)"
+  # asset_generator.py uses the Python standard library only: no numpy, no pip.
   command -v python3 >/dev/null || { echo "python3 required"; exit 1; }
-  python3 -c "import numpy" 2>/dev/null || pip3 install --quiet numpy
   python3 tools/asset_generator.py --out Assets/Resources/Generated/Textures --size 4096
 fi
 

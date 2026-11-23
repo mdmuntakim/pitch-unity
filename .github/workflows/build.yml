@@ -3,6 +3,11 @@ name: build
 # Builds the signed arm64 APK from a clean checkout with pinned versions.
 # One command: bash build/export.sh (see that file for the pinning).
 #
+# The whole job runs inside the official GameCI editor image. That image
+# already contains the Unity 6000.0.58f1 Linux editor, its native runtime
+# libraries (libxml2, GL, GTK, ...), the Android SDK/NDK and a JDK 17, so
+# there is nothing to download and no apt package to hunt for.
+#
 # The APK release is only published by a manual dispatch with
 # publish_release=true. A push to main builds and tests, but never publishes:
 # a release is a deliberate act, not a side effect of a commit.
@@ -30,7 +35,9 @@ permissions:
 
 env:
   UNITY_VERSION: "6000.0.58f1"
-  PITCH_TOOLS: /opt/unity-tools
+  # GameCI images install the editor here; export.sh honours this variable and
+  # therefore never downloads an editor of its own.
+  UNITY_EDITOR: /opt/unity/Editor/Unity
   # The release must sit in the 200-300 MB band: fail, do not warn.
   PITCH_ENFORCE_SIZE: "1"
 
@@ -38,40 +45,48 @@ jobs:
   android-arm64:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    container:
+      image: unityci/editor:ubuntu-6000.0.58f1-android-3
+      options: --user root
     env:
       UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
       UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
       UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
       UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
-      UNITY_EDITOR: /opt/unity-tools/Editor/Unity
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache Unity editor and import cache (checkpoint)
+      - name: Set up .NET (headless engine tests)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Cache Unity import cache (checkpoint)
         uses: actions/cache@v4
         with:
           path: |
             Library
-            /opt/unity-tools
+            Assets/Resources/Generated
           key: pitch-unity-${UNITY_VERSION}-${{ hashFiles('Assets/**', 'Packages/manifest.json', 'ProjectSettings/**', 'tools/**') }}
           restore-keys: |
             pitch-unity-${UNITY_VERSION}-
 
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      # Keep the 2.4 GB editor across failed runs too.  The main cache step is
-      # only saved when the job succeeds, which made every failed iteration pay
-      # the download again.
-      - name: Restore cached Unity editor
-        uses: actions/cache/restore@v4
-        with:
-          path: /opt/unity-tools
-          key: unity-editor-6000.0.58f1-v1
+      - name: Verify the editor and its native libraries
+        run: |
+          # The image is the source of truth for the editor and every shared
+          # library it needs. Fail here, not after a 12 minute build, if the
+          # image is not the one we pinned.
+          test -x "$UNITY_EDITOR" || {
+            echo "::error::$UNITY_EDITOR is missing from the GameCI image"
+            exit 1
+          }
+          if ldd "$UNITY_EDITOR" | grep -q "not found"; then
+            echo "::error::Unity has missing shared libraries in the GameCI image:"
+            ldd "$UNITY_EDITOR" | grep "not found" || true
+            exit 1
+          fi
+          "$UNITY_EDITOR" -version
 
       - name: Verify Unity licence secrets are present
         run: |
@@ -87,47 +102,6 @@ jobs:
             echo "  gh secret set UNITY_PASSWORD --repo mdmuntakim/pitch-unity"
             exit 1
           fi
-
-      - name: Install Unity runtime dependencies
-        run: |
-          sudo apt-get update
-          # Unity 6 links against these even in -nographics batch mode.  Package
-          # names moved in Ubuntu 24.04 (t64 transition), so try both and let
-          # the ldd check below catch anything still missing.
-          for pkg in \
-            libxml2t64 libxml2 libgl1 libglu1-mesa libxcursor1 libxrandr2 libxinerama1 \
-            libxi6 libxss1 libxtst6 libxcomposite1 libxdamage1 libxfixes3 \
-            libnss3 libgbm1 libdrm2 libcups2 libasound2 libasound2t64 \
-            libgtk-3-0 libgtk-3-0t64 libatk1.0-0 libatk-bridge2.0-0 \
-            libpango-1.0-0 libcairo2; do
-            sudo apt-get install -y --no-install-recommends "$pkg" || true
-          done
-
-      - name: Install Unity ${UNITY_VERSION}
-        run: |
-          # The Linux editor archive extracts to Editor/ at its root, so it is
-          # unpacked directly into PITCH_TOOLS: $PITCH_TOOLS/Editor/Unity.
-          if [ ! -x "$UNITY_EDITOR" ]; then
-            curl -fsSL -o /tmp/unity-editor.tar.xz \
-              "https://download.unity3d.com/download_unity/44b8bf3a3225/LinuxEditorInstaller/Unity-${UNITY_VERSION}.tar.xz"
-            sudo mkdir -p "$PITCH_TOOLS"
-            sudo tar -xJf /tmp/unity-editor.tar.xz -C "$PITCH_TOOLS"
-            sudo chmod +x "$UNITY_EDITOR"
-          fi
-          if ldd "$UNITY_EDITOR" | grep -q "not found"; then
-            echo "::error::Unity still has missing shared libraries:"
-            ldd "$UNITY_EDITOR" | grep "not found" || true
-            exit 1
-          fi
-          "$UNITY_EDITOR" -version
-
-      - name: Save cached Unity editor
-        if: always()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: /opt/unity-tools
-          key: unity-editor-6000.0.58f1-v1
 
       - name: Activate Unity licence
         run: |
@@ -207,6 +181,16 @@ jobs:
             Build/build-facts.txt
             Build/SHA256SUMS.txt
           if-no-files-found: error
+
+      - name: Install GitHub CLI
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        run: |
+          GH_VERSION=2.105.0
+          curl -fsSL -o /tmp/gh.tar.gz \
+            "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/gh.tar.gz -C /tmp
+          install /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh
+          gh --version
 
       - name: Publish release
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release
