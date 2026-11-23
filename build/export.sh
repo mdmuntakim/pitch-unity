@@ -75,11 +75,17 @@ dotnet run --project tests/CoreTests 2>&1 | tail -20
 
 # --- export ----------------------------------------------------------------
 log "exporting signed Android arm64 APK with Unity ${UNITY_VERSION}"
-# A previous batch-mode run can leave a lock behind; the container has no
-# display, so the editor must run with -nographics.
+# A previous batch-mode run can leave a lock behind.
 rm -f Temp/UnityLockfile
-if ! PITCH_OUTPUT="$APK" "$UNITY_EDITOR" \
-  -batchmode -nographics -quit -projectPath "$PWD" \
+# Unity 6 personal licences do not carry the com.unity.editor.headless
+# entitlement, so a -nographics build fails with "build target was unsupported".
+# Run the editor on a virtual display instead (the GameCI image ships xvfb).
+UNITY_RUN=()
+if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null; then
+  UNITY_RUN=(xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24")
+fi
+if ! PITCH_OUTPUT="$APK" "${UNITY_RUN[@]}" "$UNITY_EDITOR" \
+  -batchmode -quit -projectPath "$PWD" \
   -executeMethod Pitch.EditorTools.BuildAndroid.BuildFromCli \
   -logFile "$TOOLS/unity-editor-export.log"; then
   echo "Unity export failed; last 120 lines of $TOOLS/unity-editor-export.log:"
