@@ -33,6 +33,7 @@ namespace Pitch.EditorTools
             try
             {
                 Build();
+                EditorApplication.Exit(0);
             }
             catch (Exception exception)
             {
