@@ -148,45 +148,91 @@ dotnet run --project tests/CoreTests 2>&1 | tail -20
 end_stage
 
 # --- licence / target preflight --------------------------------------------
-# Fail before the long build, not after it: this opens the project in batch mode
-# (which needs an active licence) and prints whether the Android target and its
-# module are usable. It also warms Library/, so the export below does not pay
-# the first import twice.
-begin_stage unity-preflight
-launcher=()
-if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null; then
-  launcher=(xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24")
-fi
-preflight=( "$UNITY_EDITOR" -batchmode -accept-apiupdate -quit -projectPath "$PWD"
-            -executeMethod Pitch.EditorTools.BuildAndroid.Probe -logFile - )
-: > "$PREFLIGHT_LOG"
-set +e
-timeout --signal=INT --kill-after=60s 15m "${launcher[@]}" "${preflight[@]}" 2>&1 \
-  | python3 tools/unity_log.py --log "$PREFLIGHT_LOG" --idle-warn 120
-PREFLIGHT_RC=${PIPESTATUS[0]}
-set -e
-if [ "$PREFLIGHT_RC" -ne 0 ]; then
-  echo "=== last 60 lines of $PREFLIGHT_LOG ==="
-  tail -60 "$PREFLIGHT_LOG" || true
-  log "::error::Unity preflight failed (exit $PREFLIGHT_RC): the licence is not active or the editor cannot start"
-  exit 1
-fi
-LOG_LABEL="licence-ok"
-if grep -q "PROBE android_supported=false" "$PREFLIGHT_LOG"; then
-  grep "PROBE " "$PREFLIGHT_LOG" || true
-  log "::error::the Android build target is not usable in this editor (missing AndroidPlayer module)"
-  exit 1
-fi
-grep -q "PROBE android_supported=true" "$PREFLIGHT_LOG" || {
-  tail -40 "$PREFLIGHT_LOG" || true
-  log "::error::the preflight did not report the Android target; see the log above"
-  exit 1
+# Fail before the long build, not after it. Two cheap editor runs (about 10 s
+# each once Library/ exists) prove that the licence is active and report
+# whether the Android target is usable in batch mode.
+#
+# Unity 6 checks the `com.unity.editor.headless` entitlement for a player build
+# in -batchmode. A Personal licence activated from account credentials does not
+# carry it, so batch mode reports "build target was unsupported" (that is the
+# exact message recorded in run 45095306407) and the build stops in 200 ms.
+# Removing -batchmode avoids the entitlement but leaves an interactive editor
+# that waits forever - that was runs 45101262640/45101265416, 5h32m of nothing.
+# Neither extreme is right: batch mode is tried first, and the interactive
+# editor is used only when batch mode says the target is unusable, still under
+# the same timeouts and with the same streamed log.
+preflight() { # mode logfile -> sets PREFLIGHT_RC and PROBE_SUPPORTED
+  local mode="$1" log_file="$2"
+  local -a args=( "$UNITY_EDITOR" )
+  [ "$mode" = "batch" ] && args+=( -batchmode )
+  args+=( -accept-apiupdate -quit -projectPath "$PWD" -buildTarget Android
+          -executeMethod Pitch.EditorTools.BuildAndroid.Probe -logFile - )
+  local -a display=()
+  if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null; then
+    display=(xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24")
+  fi
+  : > "$log_file"
+  log "preflight: mode=$mode"
+  set +e
+  timeout --signal=INT --kill-after=60s 15m "${display[@]}" "${args[@]}" 2>&1 \
+    | python3 tools/unity_log.py --log "$log_file" --idle-warn 120
+  PREFLIGHT_RC=${PIPESTATUS[0]}
+  set -e
+  if grep -q "PROBE android_supported=true" "$log_file" 2>/dev/null; then
+    PROBE_SUPPORTED=true
+  else
+    PROBE_SUPPORTED=false
+  fi
+  grep "PROBE " "$log_file" 2>/dev/null | sed 's/^/    /' || true
+  return 0
 }
-grep "PROBE " "$PREFLIGHT_LOG" | sed 's/^/    /' || true
-if grep -qiE "No valid Unity Editor license|License is not active|Failed to activate" "$PREFLIGHT_LOG"; then
-  log "::error::Unity reports an inactive licence; refusing to start the long build"
-  exit 1
+
+begin_stage unity-preflight
+UNITY_MODE="${PITCH_UNITY_MODE:-auto}"
+PREFLIGHT_LOG="$TOOLS/unity-preflight.log"
+PREFLIGHT_LOG_GUI="$TOOLS/unity-preflight-gui.log"
+
+if [ "$UNITY_MODE" = "auto" ] || [ "$UNITY_MODE" = "batch" ]; then
+  preflight batch "$PREFLIGHT_LOG"
+  if [ "$PREFLIGHT_RC" -ne 0 ]; then
+    echo "=== last 60 lines of $PREFLIGHT_LOG ==="
+    tail -60 "$PREFLIGHT_LOG" || true
+    log "::error::the Unity editor cannot start (exit $PREFLIGHT_RC): the licence is not active"
+    exit 1
+  fi
+  if grep -qiE "No valid Unity Editor license|License is not active|Failed to activate" "$PREFLIGHT_LOG"; then
+    log "::error::Unity reports an inactive licence; refusing to start the long build"
+    exit 1
+  fi
+  if [ "$PROBE_SUPPORTED" = "true" ]; then
+    UNITY_MODE=batch
+  elif [ "$UNITY_MODE" = "batch" ]; then
+    log "::error::the Android build target is unusable in batch mode (see the log above)"
+    exit 1
+  else
+    log "batch mode reports the Android target unusable (Personal licence without com.unity.editor.headless); probing the interactive mode"
+  fi
 fi
+
+if [ "$UNITY_MODE" = "auto" ] || [ "$UNITY_MODE" = "gui" ]; then
+  preflight gui "$PREFLIGHT_LOG_GUI"
+  if [ "$PREFLIGHT_RC" -ne 0 ]; then
+    echo "=== last 60 lines of $PREFLIGHT_LOG_GUI ==="
+    tail -60 "$PREFLIGHT_LOG_GUI" || true
+    log "::error::the Unity editor cannot start on the virtual display (exit $PREFLIGHT_RC)"
+    exit 1
+  fi
+  if [ "$PROBE_SUPPORTED" = "true" ]; then
+    UNITY_MODE=gui
+  else
+    # The target check itself can be blocked by the missing headless
+    # entitlement even outside batch mode. The build below is bounded and
+    # streamed, so try it and let BuildPlayer report the real reason.
+    UNITY_MODE=gui
+    log "warning: the Android target still reports unsupported; attempting the bounded GUI build anyway"
+  fi
+fi
+log "licence active, mode selected: $UNITY_MODE"
 end_stage
 
 # --- export ----------------------------------------------------------------
@@ -220,7 +266,7 @@ unity_attempt() {
 begin_stage unity-export
 rm -f Temp/UnityLockfile
 ATTEMPT_START=$(date +%s)
-unity_attempt batch "$UNITY_TIMEOUT"
+unity_attempt "$UNITY_MODE" "$UNITY_TIMEOUT"
 EXPORT_RC=$ATTEMPT_RC
 ATTEMPT_SECONDS=$(( $(date +%s) - ATTEMPT_START ))
 
@@ -230,7 +276,8 @@ ATTEMPT_SECONDS=$(( $(date +%s) - ATTEMPT_START ))
 # it is bounded to 25m and only happens after a fast, recognisable failure, so
 # it cannot turn a hang into another multi-hour run.
 if [ "$EXPORT_RC" -ne 0 ] && [ "$ATTEMPT_SECONDS" -lt 420 ] \
-   && [ "$UNITY_MODE" != "batch" ] && grep -q "com.unity.editor.headless" "$UNITY_LOG" 2>/dev/null; then
+   && [ "$UNITY_MODE" = "batch" ] \
+   && grep -q "com.unity.editor.headless" "$UNITY_LOG" 2>/dev/null; then
   log "batch mode hit the headless entitlement after ${ATTEMPT_SECONDS}s; retrying once on the virtual display without -batchmode"
   ATTEMPT_START=$(date +%s)
   unity_attempt gui 25m

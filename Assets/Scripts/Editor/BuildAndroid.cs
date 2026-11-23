@@ -42,9 +42,13 @@ namespace Pitch.EditorTools
             string engines = Path.Combine(EditorApplication.applicationContentsPath, "PlaybackEngines");
             Debug.Log($"[Pitch] PROBE playback_engines={engines} " +
                       $"androidplayer={Directory.Exists(Path.Combine(engines, "AndroidPlayer")).ToString().ToLowerInvariant()}");
+            // Exit 0 even when the target is unsupported: this is a report, and
+            // build/export.sh decides whether to switch to GUI mode or fail.
+            // A non-zero exit is reserved for "the editor cannot run at all".
             if (!supported)
-                Debug.LogError("[Pitch] PROBE the Android build target is not supported by this editor/installation");
-            EditorApplication.Exit(supported ? 0 : 3);
+                Debug.LogWarning("[Pitch] PROBE the Android build target is unsupported in this mode " +
+                                 "(a Personal licence without com.unity.editor.headless reports this in batch mode)");
+            EditorApplication.Exit(0);
         }
 
         /// <summary>Entry point for -executeMethod from CI.</summary>

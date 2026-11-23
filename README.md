@@ -127,9 +127,10 @@ on success, failure and cancellation alike.
 
 Unity 6 refuses a player build in `-batchmode` when the licence lacks the
 `com.unity.editor.headless` entitlement ("Error building player because build target was
-unsupported"). The editor is therefore run on an Xvfb display, and if that entitlement
-error appears within the first seven minutes the script retries once without
-`-batchmode`, with the same timeouts and the same streamed log.
+unsupported"). The preflight reports `[Pitch] PROBE android_supported=...` in both modes
+in about ten seconds, and `export.sh` picks the mode from that answer: batch mode when it
+is usable, the interactive editor on Xvfb otherwise. Both are under the same timeouts and
+the same streamed log, so neither can wait forever.
 
 ### Size budget
 
