@@ -42,6 +42,7 @@ jobs:
       UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
       UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
       UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
       UNITY_EDITOR: /opt/unity-tools/Editor/Unity
     steps:
       - name: Checkout repository
@@ -65,21 +66,12 @@ jobs:
 
       - name: Verify Unity licence secrets are present
         run: |
-          missing=0
-          if [ -z "${UNITY_LICENSE:-}" ]; then
-            echo "  - UNITY_LICENSE   (contents of the .ulf licence file, or its base64)"
-            missing=1
-          fi
-          if [ -z "${UNITY_EMAIL:-}" ]; then
-            echo "  - UNITY_EMAIL     (Unity account e-mail)"
-            missing=1
-          fi
-          if [ -z "${UNITY_PASSWORD:-}" ]; then
-            echo "  - UNITY_PASSWORD  (Unity account password)"
-            missing=1
-          fi
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::Unity licence activation is unavailable: the secrets listed above are not set in mdmuntakim/pitch-unity. No APK can be built and no release is published."
+          if [ -n "${UNITY_LICENSE:-}" ]; then
+            echo "Using UNITY_LICENSE (.ulf file)."
+          elif [ -n "${UNITY_EMAIL:-}" ] && [ -n "${UNITY_PASSWORD:-}" ]; then
+            echo "Using Unity account credentials (no .ulf file)."
+          else
+            echo "::error::Unity licence activation is unavailable: set UNITY_LICENSE or both UNITY_EMAIL and UNITY_PASSWORD in mdmuntakim/pitch-unity. No APK can be built and no release is published."
             echo "Set them with:"
             echo "  gh secret set UNITY_LICENSE  --repo mdmuntakim/pitch-unity < Unity_lic.ulf"
             echo "  gh secret set UNITY_EMAIL    --repo mdmuntakim/pitch-unity"
@@ -102,23 +94,42 @@ jobs:
 
       - name: Activate Unity licence
         run: |
-          # The .ulf is accepted either raw (starts with <?xml) or base64-encoded.
-          if printf '%s' "$UNITY_LICENSE" | head -c 5 | grep -qF '<?xml'; then
-            printf '%s\n' "$UNITY_LICENSE" > /tmp/Unity_lic.ulf
+          if [ -n "${UNITY_LICENSE:-}" ]; then
+            # The .ulf is accepted either raw (starts with <?xml) or base64-encoded.
+            if printf '%s' "$UNITY_LICENSE" | head -c 5 | grep -qF '<?xml'; then
+              printf '%s\n' "$UNITY_LICENSE" > /tmp/Unity_lic.ulf
+            else
+              printf '%s' "$UNITY_LICENSE" | base64 -d > /tmp/Unity_lic.ulf
+            fi
+            grep -q '<UnityLicense' /tmp/Unity_lic.ulf || {
+              echo "::error::UNITY_LICENSE is not a Unity .ulf licence file (neither XML nor base64-encoded XML)."
+              exit 1
+            }
+            # Unity 6 on Linux reads licences from both of these locations.
+            for dir in "$HOME/.local/share/unity3/Unity_licenses" "$HOME/.local/share/unity3d/Unity"; do
+              mkdir -p "$dir"
+              cp /tmp/Unity_lic.ulf "$dir/Unity_licenses.ulf"
+              cp /tmp/Unity_lic.ulf "$dir/Unity_lic.ulf"
+              chmod 600 "$dir"/*.ulf
+            done
           else
-            printf '%s' "$UNITY_LICENSE" | base64 -d > /tmp/Unity_lic.ulf
+            # No .ulf file: activate the editor with the Unity account.
+            args=(-batchmode -nographics -quit -username "$UNITY_EMAIL" -password "$UNITY_PASSWORD")
+            if [ -n "${UNITY_SERIAL:-}" ]; then
+              args+=(-serial "$UNITY_SERIAL")
+            fi
+            if ! "$UNITY_EDITOR" "${args[@]}" -logFile /tmp/unity-activate.log; then
+              tail -80 /tmp/unity-activate.log || true
+              echo "::error::Unity account activation failed (see the log above)."
+              exit 1
+            fi
+            if grep -qiE "No valid Unity Editor license|License is not active|Failed to activate|Unable to activate" /tmp/unity-activate.log; then
+              tail -80 /tmp/unity-activate.log || true
+              echo "::error::Unity did not activate a licence with the supplied account."
+              exit 1
+            fi
+            echo "Unity account activation completed."
           fi
-          grep -q '<UnityLicense' /tmp/Unity_lic.ulf || {
-            echo "::error::UNITY_LICENSE is not a Unity .ulf licence file (neither XML nor base64-encoded XML)."
-            exit 1
-          }
-          # Unity 6 on Linux reads licences from both of these locations.
-          for dir in "$HOME/.local/share/unity3/Unity_licenses" "$HOME/.local/share/unity3d/Unity"; do
-            mkdir -p "$dir"
-            cp /tmp/Unity_lic.ulf "$dir/Unity_licenses.ulf"
-            cp /tmp/Unity_lic.ulf "$dir/Unity_lic.ulf"
-            chmod 600 "$dir"/*.ulf
-          done
           # Verify the licence without building anything: a batch-mode import.
           if ! "$UNITY_EDITOR" -batchmode -quit -nographics \
                  -projectPath "$PWD" -logFile /tmp/unity-licence-check.log; then
