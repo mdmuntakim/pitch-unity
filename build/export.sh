@@ -157,6 +157,11 @@ licence_report() {
     [ -d "$dir" ] || continue
     log "licence directory: $dir"
     ls -l "$dir" 2>/dev/null | sed 's/^/    /' || true
+    for audit in "$dir/Unity.Entitlements.Audit.log"; do
+      [ -f "$audit" ] || continue
+      log "entitlement ids seen in $(basename "$audit"):"
+      grep -oE "com\.unity\.[A-Za-z0-9._-]+" "$audit" | sort -u | head -20 | sed 's/^/    /' || true
+    done
     file="$dir/UnityEntitlementLicense.xml"
     if [ -f "$file" ]; then
       grep -oE "<(UpdateDate|LicenseType|SerialMasked|ProductName|StopDate)>[^<]*" "$file" \
